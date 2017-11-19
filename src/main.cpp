@@ -23,6 +23,10 @@
 // to write the first five frames from "myvideofile.mpg" to disk in PPM
 // format.
 
+#include <vector>
+
+using namespace std;
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -34,11 +38,11 @@ extern "C" {
 
 void SaveFrame(AVFrame *pFrame, int width, int height, int iFrame) {
     FILE *pFile;
-    char szFilename[32];
+    char szFilename[256];
     int  y;
     
     // Open file
-    sprintf(szFilename, "frame%d.ppm", iFrame);
+    sprintf(szFilename, "E:/ffmpeg_test/frames/frame%d.ppm", iFrame);
     pFile=fopen(szFilename, "wb");
     if(pFile==NULL)
         return;
@@ -49,9 +53,38 @@ void SaveFrame(AVFrame *pFrame, int width, int height, int iFrame) {
     // Write pixel data
     for(y=0; y<height; y++)
         fwrite(pFrame->data[0]+y*pFrame->linesize[0], 1, width*3, pFile);
+
+	unsigned char* color = (unsigned char*)pFrame->data;
     
     // Close file
     fclose(pFile);
+}
+
+static SwsContext* swsCtx = NULL;
+static AVFrame*pFrameRGB = NULL;
+static void yuv420p_to_rgb(AVFrame* frame420p, AVFrame* frameRGB)
+{
+	if (!swsCtx) {
+
+		uint8_t *buffer = NULL;
+		int numBytes;
+		// Determine required buffer size and allocate buffer
+		numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, frame420p->width,
+			frame420p->height, 1);
+		buffer = (uint8_t *)av_malloc(numBytes * sizeof(uint8_t));
+
+		//pFrameRGB->buf = buffer;
+		pFrameRGB->width = frame420p->width;
+		pFrameRGB->height = frame420p->height;
+		pFrameRGB->format = AV_PIX_FMT_RGB24;
+		int x = av_image_fill_arrays(pFrameRGB->data,pFrameRGB->linesize, buffer, AV_PIX_FMT_RGB24, frame420p->width, frame420p->height, 1);
+
+		swsCtx = sws_getContext(frame420p->width, frame420p->height, AVPixelFormat(frame420p->format), frame420p->width, frame420p->height, AV_PIX_FMT_RGB24,SWS_BILINEAR,NULL,NULL,NULL);
+	}
+
+	int result = sws_scale(swsCtx, (uint8_t const * const *)frame420p->data, frame420p->linesize, 0, frame420p->height, frameRGB->data, frameRGB->linesize);
+
+	int a = 10;
 }
 
 static int frameCount = 0;
@@ -76,6 +109,10 @@ void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket 
             exit(1);
         }
         
+
+		yuv420p_to_rgb(frame, pFrameRGB);
+		SaveFrame(pFrameRGB, pFrameRGB->width, pFrameRGB->height, frameCount);
+
         frameCount++;
         fprintf(stderr,"get frame --- %d\n", frameCount);
     }
@@ -104,7 +141,7 @@ int main() {
         return -1; // Couldn't find stream information
     
     // Dump information about file onto standard error
-	av_dump_format(pFormatCtx, 0, "http://albertlab-huanan.oss-cn-shenzhen.aliyuncs.com/Videos/spotmini.webm", 0);
+	//av_dump_format(pFormatCtx, 0, "http://albertlab-huanan.oss-cn-shenzhen.aliyuncs.com/Videos/spotmini.webm", 0);
     
     // Find the first video stream
     videoStream=-1;
@@ -134,6 +171,7 @@ int main() {
     
     // Allocate video frame
     pFrame=av_frame_alloc();
+	pFrameRGB = av_frame_alloc();
     
     // Read frames and save first five frames to disk
     // i=0;
@@ -148,6 +186,7 @@ int main() {
     
     // Free the YUV frame
     av_frame_free(&pFrame);
+	av_frame_free(&pFrameRGB);
     
     //avcodec_free_context(&pCodecCtxOrig);
     avcodec_free_context(&pCodecCtx);
