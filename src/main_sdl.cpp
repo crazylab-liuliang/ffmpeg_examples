@@ -128,6 +128,12 @@ void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket 
 			pts = 0;
 		}
 
+		AVRational timeBase = dec_ctx->time_base;
+		AVRational frameRate = av_inv_q(dec_ctx->framerate);
+
+		pts *= av_q2d(frameRate);
+
+
 		DWORD elapsedTime = GetTickCount() - startTime;
 		while (elapsedTime < pts)
 		{
@@ -135,7 +141,6 @@ void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket 
 			elapsedTime = GetTickCount() - startTime;
 		}
 
-		//pts *= av_q2d();
 
 
 		SDL_LockYUVOverlay(bmp);
@@ -201,6 +206,10 @@ int audio_decode_frame(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket *pkt)
 			return -1;
 		}
 
+		int dataSize = av_samples_get_buffer_size(NULL, dec_ctx->channels, frame->nb_samples, aCodecCtx->sample_fmt, 1);
+
+
+
 		int sample_bytes = av_get_bytes_per_sample(dec_ctx->sample_fmt);
 		for (int i = 0; i < frame->nb_samples; i++)
 		{
@@ -255,8 +264,37 @@ void audio_callback(void *userdata, Uint8 *stream, int len) {
 	}
 }
 
+#include "easywsclient.hpp"
+
+void handle_ws_message(const std::vector<uint8_t>& message)
+{
+	int  a = 10;
+}
 
 int main() {
+/*
+#ifdef _WIN32
+	INT rc;
+	WSADATA wsaData;
+	rc = WSAStartup(MAKEWORD(2,2), &wsaData);
+	if (rc)
+	{
+		printf("WSAStartup Failed\n");
+		return -1;
+	}
+#endif
+
+	static easywsclient::WebSocket::pointer ws = easywsclient::WebSocket::from_url("ws://124.243.220.24:10002/camera_0");
+	while (ws->getReadyState() != easywsclient::WebSocket::CLOSED)
+	{
+		ws->poll();
+		ws->dispatchBinary(handle_ws_message);
+	}
+
+	delete ws;
+	WSACleanup();*/
+
+
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
 		fprintf(stderr, "Could not initialize SDL - %s\n", SDL_GetError());
 		return -1;
@@ -276,7 +314,7 @@ int main() {
     av_register_all();
     
     // Open video file
-	if (avformat_open_input(&pFormatCtx, "http://albertlab-huanan.oss-cn-shenzhen.aliyuncs.com/Videos/spotmini.webm", NULL, NULL)!=0)
+	if (avformat_open_input(&pFormatCtx, "e:/sixwheel.mp4", NULL, NULL)!=0)
         return -1; // Couldn't open file
     
     // Retrieve stream information
@@ -360,7 +398,7 @@ int main() {
             decode_frame_from_packet(pCodecCtx, pFrame, &packet);
         }
 		if (packet.stream_index == audioStream) {
-			//audio_decode_frame(aCodecCtx, aFrame, &packet);
+			audio_decode_frame(aCodecCtx, aFrame, &packet);
 		}
     }
     
