@@ -23,7 +23,13 @@
 // to write the first five frames from "myvideofile.mpg" to disk in PPM
 // format.
 
+#include <assert.h>
 #include <vector>
+#include <SDL.h>
+
+#undef main
+
+#include <SDL_thread.h>
 
 using namespace std;
 
@@ -35,6 +41,11 @@ extern "C" {
 }
 
 #include <stdio.h>
+
+#include <Windows.h>
+
+SDL_Surface* screen = NULL;
+SDL_Overlay* bmp = NULL;
 
 void SaveFrame(AVFrame *pFrame, int width, int height, int iFrame) {
     FILE *pFile;
@@ -88,7 +99,8 @@ static int frameCount = 0;
 
 void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket *pkt)
 {
-    char buf[1024];
+	static DWORD startTime = GetTickCount();
+
     int ret;
     
     ret = avcodec_send_packet(dec_ctx, pkt);
@@ -106,16 +118,150 @@ void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket 
             exit(1);
         }
         
+		double pts = 0;
+		if (pkt->dts != AV_NOPTS_VALUE)
+		{
+			pts = av_frame_get_best_effort_timestamp(frame);
+		}
+		else
+		{
+			pts = 0;
+		}
 
-		yuv420p_to_rgb(frame, pFrameRGB);
-		SaveFrame(pFrameRGB, pFrameRGB->width, pFrameRGB->height, frameCount);
+		DWORD elapsedTime = GetTickCount() - startTime;
+		while (elapsedTime < pts)
+		{
+			Sleep(5);
+			elapsedTime = GetTickCount() - startTime;
+		}
+
+		//pts *= av_q2d();
+
+
+		SDL_LockYUVOverlay(bmp);
+
+		bmp->pixels[0] = frame->data[0];
+		bmp->pixels[1] = frame->data[2];
+		bmp->pixels[2] = frame->data[1];
+		bmp->pitches[0] = frame->linesize[0];
+		bmp->pitches[1] = frame->linesize[1];
+		bmp->pitches[2] = frame->linesize[2];
+
+		SDL_UnlockYUVOverlay(bmp);
+
+		//yuv420p_to_rgb(frame, pFrameRGB);
+		//SaveFrame(pFrameRGB, pFrameRGB->width, pFrameRGB->height, frameCount);
 
         frameCount++;
         fprintf(stderr,"get frame --- %d\n", frameCount);
+
+		SDL_Rect rect;
+		rect.x = 0;
+		rect.y = 0;
+		rect.w = frame->width;
+		rect.h = frame->height;
+
+		SDL_DisplayYUVOverlay(bmp, &rect);
     }
 }
 
+AVCodecContext*	  aCodecCtx = NULL;
+AVCodecParserContext* parser = NULL;
+AVCodec*		  aCodec = NULL;
+
+typedef struct PacketQueue {
+	AVPacketList *first_pkt, *last_pkt;
+	int nb_packets;
+	int size;
+	SDL_mutex *mutex;
+	SDL_cond *cond;
+} PacketQueue;
+
+PacketQueue audioq;
+
+int quit = 0;
+
+
+int audio_decode_frame(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket *pkt)
+{
+	int ret = avcodec_send_packet(dec_ctx, pkt);
+	if (ret < 0) {
+		fprintf(stderr, "Error sending a packet for decoding\n");
+		return -1;
+	}
+
+	while (ret >= 0) {
+		ret = avcodec_receive_frame(dec_ctx, frame);
+		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+		{
+			return -1;
+		}
+		else if (ret < 0) {
+			fprintf(stderr, "Error during decoding\n");
+			return -1;
+		}
+
+		int sample_bytes = av_get_bytes_per_sample(dec_ctx->sample_fmt);
+		for (int i = 0; i < frame->nb_samples; i++)
+		{
+			for (int ch = 0; ch < dec_ctx->channels; ch++)
+			{
+
+				uint8_t* bufferStart = frame->data[ch] + sample_bytes * i;
+				int a = 10;
+			}
+		}
+
+		int a = 10;
+	}
+
+	return 1024;
+}
+
+
+#define SDL_AUDIO_BUFFER_SIZE 1024
+#define MAX_AUDIO_FRAME_SIZE 192000
+
+void audio_callback(void *userdata, Uint8 *stream, int len) {
+
+	AVCodecContext *aCodecCtx = (AVCodecContext *)userdata;
+	int len1, audio_size;
+
+	static uint8_t audio_buf[(MAX_AUDIO_FRAME_SIZE * 3) / 2];
+	static unsigned int audio_buf_size = 0;
+	static unsigned int audio_buf_index = 0;
+
+	while (len > 0) {
+		if (audio_buf_index >= audio_buf_size) {
+			/* We have already sent all our data; get more */
+			audio_size = 0;// audio_decode_frame(aCodecCtx, audio_buf, sizeof(audio_buf));
+			if (audio_size < 0) {
+				/* If error, output silence */
+				audio_buf_size = 1024; // arbitrary?
+				memset(audio_buf, 0, audio_buf_size);
+			}
+			else {
+				audio_buf_size = audio_size;
+			}
+			audio_buf_index = 0;
+		}
+		len1 = audio_buf_size - audio_buf_index;
+		if (len1 > len)
+			len1 = len;
+		memcpy(stream, (uint8_t *)audio_buf + audio_buf_index, len1);
+		len -= len1;
+		stream += len1;
+		audio_buf_index += len1;
+	}
+}
+
+
 int main() {
+	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
+		fprintf(stderr, "Could not initialize SDL - %s\n", SDL_GetError());
+		return -1;
+	}
+
     // Initalizing these to NULL prevents segfaults!
     AVFormatContext   *pFormatCtx = NULL;
     int               videoStream;
@@ -142,13 +288,39 @@ int main() {
     
     // Find the first video stream
     videoStream=-1;
-    for(int i=0; i<pFormatCtx->nb_streams; i++)
-        if(pFormatCtx->streams[i]->codecpar->codec_type==AVMEDIA_TYPE_VIDEO) {
-            videoStream=i;
-            break;
-        }
+	int audioStream = -1;
+	for (int i = 0; i < pFormatCtx->nb_streams; i++) {
+		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && videoStream<0) {
+			videoStream = i;
+		}
+
+		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && audioStream<0) {
+			audioStream = i;
+		}
+	}
+
     if(videoStream==-1)
         return -1; // Didn't find a video stream
+
+	if (audioStream == -1)
+		return -1;
+
+	aCodec = avcodec_find_decoder(pFormatCtx->streams[audioStream]->codecpar->codec_id);
+	if (aCodec == NULL)
+		return -1;
+
+	parser = av_parser_init(pFormatCtx->streams[audioStream]->codecpar->codec_id);
+	if (!parser)
+		return -1;
+
+	aCodecCtx = avcodec_alloc_context3(aCodec);
+
+	avcodec_parameters_to_context(aCodecCtx, pFormatCtx->streams[audioStream]->codecpar);
+
+	if (avcodec_open2(aCodecCtx, aCodec, NULL) < 0)
+		return -1;
+
+	//----------------------------------------------
     
     // Find the decoder for the video stream
     pCodec=avcodec_find_decoder(pFormatCtx->streams[videoStream]->codecpar->codec_id);
@@ -169,7 +341,17 @@ int main() {
     // Allocate video frame
     pFrame=av_frame_alloc();
 	pFrameRGB = av_frame_alloc();
-    
+
+	AVFrame* aFrame = av_frame_alloc();
+
+
+	screen = SDL_SetVideoMode(pCodecCtx->width, pCodecCtx->height, 0, 0);
+	if (!screen)
+		return -1;
+
+	bmp = SDL_CreateYUVOverlay(pCodecCtx->width, pCodecCtx->height, SDL_YV12_OVERLAY, screen);
+
+
     // Read frames and save first five frames to disk
     // i=0;
     while(av_read_frame(pFormatCtx, &packet)>=0) {
@@ -177,6 +359,9 @@ int main() {
         if(packet.stream_index==videoStream) {
             decode_frame_from_packet(pCodecCtx, pFrame, &packet);
         }
+		if (packet.stream_index == audioStream) {
+			//audio_decode_frame(aCodecCtx, aFrame, &packet);
+		}
     }
     
 	av_packet_unref(&packet);
