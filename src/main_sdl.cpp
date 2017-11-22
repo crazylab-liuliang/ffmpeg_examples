@@ -26,6 +26,11 @@
 #include <assert.h>
 #include <vector>
 #include <SDL.h>
+#include <thread>
+#include "QRingBuffer.h"
+#include <vector>
+
+using namespace std;
 
 #undef main
 
@@ -97,7 +102,7 @@ static void yuv420p_to_rgb(AVFrame* frame420p, AVFrame* frameRGB)
 
 static int frameCount = 0;
 
-void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket *pkt)
+int decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket *pkt)
 {
 	static DWORD startTime = GetTickCount();
 
@@ -106,16 +111,19 @@ void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket 
     ret = avcodec_send_packet(dec_ctx, pkt);
     if (ret < 0) {
         fprintf(stderr, "Error sending a packet for decoding\n");
-        exit(1);
+        return -1;
     }
     
+
+	int frameNumPerPkt = 0;
+
     while (ret >= 0) {
         ret = avcodec_receive_frame(dec_ctx, frame);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-            return;
+            return -1;
         else if (ret < 0) {
             fprintf(stderr, "Error during decoding\n");
-            exit(1);
+            return -1;
         }
         
 		double pts = 0;
@@ -134,13 +142,13 @@ void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket 
 		pts *= av_q2d(frameRate);
 
 
-		DWORD elapsedTime = GetTickCount() - startTime;
+		/*DWORD elapsedTime = GetTickCount() - startTime;
 		while (elapsedTime < pts)
 		{
 			Sleep(5);
 			elapsedTime = GetTickCount() - startTime;
 		}
-
+		*/
 
 
 		SDL_LockYUVOverlay(bmp);
@@ -167,7 +175,13 @@ void decode_frame_from_packet(AVCodecContext *dec_ctx, AVFrame *frame, AVPacket 
 		rect.h = frame->height;
 
 		SDL_DisplayYUVOverlay(bmp, &rect);
+
+		frameNumPerPkt++;
     }
+
+	return 0;
+
+	int a = 10;
 }
 
 AVCodecContext*	  aCodecCtx = NULL;
@@ -266,14 +280,57 @@ void audio_callback(void *userdata, Uint8 *stream, int len) {
 
 #include "easywsclient.hpp"
 
+int wsBufferIdx = 0;
+vector<uint8_t> wsBuffer; 
 void handle_ws_message(const std::vector<uint8_t>& message)
 {
-	int  a = 10;
+	for (int i = 0; i < message.size(); i++)
+	{
+		wsBuffer.push_back(message[i]);
+
+		//wsBuffer.write(message.data(), message.size());
+	}
 }
 
+
+
+int fill_iobuffer(void* opaque, uint8_t* buf, int bufsize) {
+	
+	int true_size = min(bufsize, wsBuffer.size()-wsBufferIdx);
+	for (int i = 0; i < true_size; i++)
+	{
+		buf[i] = wsBuffer[wsBufferIdx];
+		wsBufferIdx++;
+		//wsBuffer.read(buf, true_size);
+
+		//buf[i] = wsBuffer.front();
+		//wsBuffer.pop();
+	}
+
+	return true_size > 0 ? true_size : -1;
+
+	return -1;
+}
+
+void wsThreadFunc()
+{
+	static easywsclient::WebSocket::pointer ws = easywsclient::WebSocket::from_url("ws://124.243.220.24:10002/camera_0");
+	while (ws->getReadyState() != easywsclient::WebSocket::CLOSED)
+	{
+		ws->poll();
+		ws->dispatchBinary(handle_ws_message);
+	}
+}
+
+
 int main() {
-/*
+
+
+
 #ifdef _WIN32
+
+	wsBuffer.reserve(512 * 1024 * 1024);
+
 	INT rc;
 	WSADATA wsaData;
 	rc = WSAStartup(MAKEWORD(2,2), &wsaData);
@@ -284,15 +341,8 @@ int main() {
 	}
 #endif
 
-	static easywsclient::WebSocket::pointer ws = easywsclient::WebSocket::from_url("ws://124.243.220.24:10002/camera_0");
-	while (ws->getReadyState() != easywsclient::WebSocket::CLOSED)
-	{
-		ws->poll();
-		ws->dispatchBinary(handle_ws_message);
-	}
+	std::thread th(wsThreadFunc);
 
-	delete ws;
-	WSACleanup();*/
 
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
@@ -306,16 +356,27 @@ int main() {
     AVCodecContext    *pCodecCtx = NULL;
     AVCodec           *pCodec = NULL;
     AVFrame           *pFrame = NULL;
-    AVPacket          packet;
+    AVPacket*          packet;
 
 	avformat_network_init();
 
     // Register all formats and codecs
     av_register_all();
     
+	packet = av_packet_alloc();
+
+	unsigned char* iobuffer = (unsigned char*)av_malloc(32768);
+	AVIOContext* avio = avio_alloc_context(iobuffer, 32768, 0, NULL, fill_iobuffer, NULL, NULL);
+	pFormatCtx = avformat_alloc_context();
+	pFormatCtx->pb = avio;
+
+	Sleep(1000);
+
     // Open video file
-	if (avformat_open_input(&pFormatCtx, "e:/sixwheel.mp4", NULL, NULL)!=0)
-        return -1; // Couldn't open file
+	while (avformat_open_input(&pFormatCtx, ""/* "e:/sixwheel.mp4"*/, NULL, NULL) != 0)
+	{
+		Sleep(1000);
+	}
     
     // Retrieve stream information
     if(avformat_find_stream_info(pFormatCtx, NULL)<0)
@@ -340,23 +401,23 @@ int main() {
     if(videoStream==-1)
         return -1; // Didn't find a video stream
 
-	if (audioStream == -1)
-		return -1;
+	//if (audioStream == -1)
+	//	return -1;
 
-	aCodec = avcodec_find_decoder(pFormatCtx->streams[audioStream]->codecpar->codec_id);
-	if (aCodec == NULL)
-		return -1;
+	//aCodec = avcodec_find_decoder(pFormatCtx->streams[audioStream]->codecpar->codec_id);
+	//if (aCodec == NULL)
+	//	return -1;
 
-	parser = av_parser_init(pFormatCtx->streams[audioStream]->codecpar->codec_id);
-	if (!parser)
-		return -1;
+	//parser = av_parser_init(pFormatCtx->streams[audioStream]->codecpar->codec_id);
+	//if (!parser)
+	//	return -1;
 
-	aCodecCtx = avcodec_alloc_context3(aCodec);
+	//aCodecCtx = avcodec_alloc_context3(aCodec);
 
-	avcodec_parameters_to_context(aCodecCtx, pFormatCtx->streams[audioStream]->codecpar);
+	//avcodec_parameters_to_context(aCodecCtx, pFormatCtx->streams[audioStream]->codecpar);
 
-	if (avcodec_open2(aCodecCtx, aCodec, NULL) < 0)
-		return -1;
+	//if (avcodec_open2(aCodecCtx, aCodec, NULL) < 0)
+	//	return -1;
 
 	//----------------------------------------------
     
@@ -370,6 +431,10 @@ int main() {
     // Copy context
     pCodecCtx = avcodec_alloc_context3(pCodec);
     
+
+	AVCodecParameters * codecPar = pFormatCtx->streams[videoStream]->codecpar;
+
+
     avcodec_parameters_to_context(pCodecCtx,pFormatCtx->streams[videoStream]->codecpar);
     
     // Open codec
@@ -392,17 +457,20 @@ int main() {
 
     // Read frames and save first five frames to disk
     // i=0;
-    while(av_read_frame(pFormatCtx, &packet)>=0) {
-        // Is this a packet from the video stream?
-        if(packet.stream_index==videoStream) {
-            decode_frame_from_packet(pCodecCtx, pFrame, &packet);
-        }
-		if (packet.stream_index == audioStream) {
-			audio_decode_frame(aCodecCtx, aFrame, &packet);
+	while (true) {
+		if (av_read_frame(pFormatCtx, packet) >= 0) {
+			// Is this a packet from the video stream?
+			if (packet->stream_index == videoStream) {
+				Sleep(50);
+				decode_frame_from_packet(pCodecCtx, pFrame, packet);
+			}
+			if (packet->stream_index == audioStream) {
+				//audio_decode_frame(aCodecCtx, aFrame, &packet);
+			}
 		}
-    }
+	}
     
-	av_packet_unref(&packet);
+	av_packet_unref(packet);
     
     // Free the YUV frame
     av_frame_free(&pFrame);
@@ -416,6 +484,9 @@ int main() {
     
     // Close the video file
     avformat_close_input(&pFormatCtx);
+
+	//delete ws;
+	WSACleanup();
     
     return 0;
 }
