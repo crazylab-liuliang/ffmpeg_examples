@@ -307,9 +307,9 @@ int fill_iobuffer(void* opaque, uint8_t* buf, int bufsize) {
 		//wsBuffer.pop();
 	}
 
-	return true_size > 0 ? true_size : -1;
+	return true_size > 0 ? true_size : 0;
 
-	return -1;
+	return 0;
 }
 
 void wsThreadFunc()
@@ -370,12 +370,19 @@ int main() {
 	pFormatCtx = avformat_alloc_context();
 	pFormatCtx->pb = avio;
 
-	Sleep(1000);
+	int startTime = GetTickCount();
+
+	while (wsBuffer.size() <64*1024)
+	{
+		Sleep(100);
+	}
+
+	int dur = GetTickCount() - startTime;
 
     // Open video file
-	while (avformat_open_input(&pFormatCtx, ""/* "e:/sixwheel.mp4"*/, NULL, NULL) != 0)
+	if (avformat_open_input(&pFormatCtx, ""/* "e:/sixwheel.mp4"*/, NULL, NULL) != 0)
 	{
-		Sleep(1000);
+		return -1;
 	}
     
     // Retrieve stream information
@@ -457,11 +464,11 @@ int main() {
 
     // Read frames and save first five frames to disk
     // i=0;
-	while (true) {
-		if (av_read_frame(pFormatCtx, packet) >= 0) {
+	while ( true) {
+		if (  (wsBuffer.size() - wsBufferIdx > 4096 * 2) && av_read_frame(pFormatCtx, packet) >= 0) {
 			// Is this a packet from the video stream?
 			if (packet->stream_index == videoStream) {
-				Sleep(50);
+				Sleep(10);
 				decode_frame_from_packet(pCodecCtx, pFrame, packet);
 			}
 			if (packet->stream_index == audioStream) {
